@@ -17,13 +17,17 @@ final class BridgeCall {
     private(set) var phase: Phase = .idle
     private(set) var muted = false
     private(set) var awaitingApproval = false
+    /// Created when the first transcript is saved (AC10: no empty chats), or given up front.
     private(set) var chatID: String?
+    private var creatingChat: Task<String, Error>?
     var onChange: (() -> Void)?
 
     struct Configuration {
         let client: OWUIClient
         let model: OWUIModel
         let delegation: DelegationMode
+        /// Continue an existing chat instead of creating one on the first transcript.
+        var chatID: String? = nil
     }
 
     // Connection
@@ -128,11 +132,10 @@ final class BridgeCall {
             // Audio is already recording (CallController.begin); frames are dropped until bridge.ready.
             audio.onInterruption = { [weak self] message in self?.fail(message) }
             let client = configuration.client
-            async let featuresTask = client.features(for: configuration.model)
-            async let chatTask = client.createChat(title: "语音通话", modelID: configuration.model.id)
-            (features, chatID) = try await (featuresTask, chatTask)
+            chatID = configuration.chatID
+            features = try await client.features(for: configuration.model)
             guard session == self.session else { return }
-            Log.call.info("chat created, delegation=\(configuration.delegation.rawValue, privacy: .public)")
+            Log.call.info("prepared, delegation=\(configuration.delegation.rawValue, privacy: .public), existing chat=\(self.chatID != nil)")
 
             delegator = switch configuration.delegation {
             case .socket: SocketDelegator(client: client)
@@ -558,9 +561,30 @@ final class BridgeCall {
         ]
     }
 
+    /// The call's chat, created on first use: a call where nobody speaks leaves no chat behind.
+    private func ensureChat() async throws -> String {
+        if let chatID { return chatID }
+        guard let configuration else { throw OWUIError.missing("聊天") }
+        if let creatingChat { return try await creatingChat.value }
+        let task = Task { try await configuration.client.createChat(title: "语音通话", modelID: configuration.model.id) }
+        creatingChat = task
+        do {
+            let id = try await task.value
+            chatID = id
+            Log.call.info("chat created on first transcript")
+            onChange?()
+            return id
+        } catch {
+            creatingChat = nil  // retry on the next transcript
+            throw error
+        }
+    }
+
     /// Appends a finished message to the end of this call's branch and saves it.
     private func addMessage(role: String, content: String, voice: JSON) async throws -> String {
-        guard let configuration, let chatID else { throw OWUIError.missing("聊天") }
+        guard let configuration else { throw OWUIError.missing("聊天") }
+        // Place the message on the branch before any await, so order follows call order even while
+        // the chat is still being created for the first transcript.
         let id = UUID().uuidString.lowercased()
         var message: [String: JSON] = [
             "id": .string(id),
@@ -578,6 +602,7 @@ final class BridgeCall {
             message["modelIdx"] = 0
         }
         history.append(HistoryMessage(id: id, role: role, content: content, spoken: role == "assistant"))
+        let chatID = try await ensureChat()
         try await configuration.client.addMessages([id: .object(message)], currentID: id, chatID: chatID)
         return id
     }
