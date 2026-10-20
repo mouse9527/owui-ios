@@ -120,6 +120,9 @@ final class BridgeCall {
         let session = session
         setPhase(.connecting)
         do {
+            // Start recording first (see CallController.start); frames are dropped until bridge.ready.
+            audio.onInterruption = { [weak self] message in self?.fail(message) }
+            try audio.start()
             let client = configuration.client
             async let featuresTask = client.features(for: configuration.model)
             async let chatTask = client.createChat(title: "语音通话", modelID: configuration.model.id)
@@ -141,7 +144,6 @@ final class BridgeCall {
             }
 
             audio.onCapture = { [weak self] pcm in self?.sendAudio(pcm) }
-            audio.onInterruption = { [weak self] message in self?.fail(message) }
             // Queued results wait for playback to finish (web: AudioWorklet `playback` reports).
             audio.onPlaybackIdle = { [weak self] in
                 guard let self else { return }
@@ -149,7 +151,6 @@ final class BridgeCall {
                 updatePhase()
                 flush()
             }
-            try audio.start()
             try openSocket(client: client, model: configuration.model)
         } catch {
             if session == self.session { fail(error.localizedDescription) }

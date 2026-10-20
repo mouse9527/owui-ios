@@ -42,8 +42,13 @@ final class CallController {
         guard !isActive else { return }
         lastError = nil
         do {
-            let configuration = try await configuration(from: settings)
+            // From the Action button the app is in the background: no permission prompt can appear,
+            // and the system expects the Live Activity and recording to start promptly. So check
+            // the microphone and show the activity before any network round trip.
             guard await AVAudioApplication.requestRecordPermission() else { throw CallError.microphone }
+            modelName = ""
+            startActivity()
+            let configuration = try await configuration(from: settings)
             modelName = configuration.model.name
             let call = BridgeCall()
             call.onChange = { [weak self, weak call] in
@@ -51,7 +56,7 @@ final class CallController {
                 self.callChanged(call)
             }
             self.call = call
-            startActivity()
+            await updateActivity()
             await call.start(configuration)
         } catch {
             lastError = error.localizedDescription
@@ -101,7 +106,7 @@ final class CallController {
     }
 
     private var state: CallActivityAttributes.ContentState {
-        .init(phase: phase, muted: call?.muted ?? false, detail: call?.awaitingApproval == true ? "请到聊天里确认" : nil)
+        .init(phase: phase, muted: call?.muted ?? false, detail: call?.awaitingApproval == true ? "请到聊天里确认" : nil, modelName: modelName)
     }
 
     private func startActivity() {
@@ -109,7 +114,7 @@ final class CallController {
         let stale = Activity<CallActivityAttributes>.activities.map(\.id)
         Task { await Self.end(ids: stale, content: nil, policy: .immediate) }
         activityID = (try? Activity.request(
-            attributes: CallActivityAttributes(modelName: modelName),
+            attributes: CallActivityAttributes(),
             content: .init(state: state, staleDate: nil)
         ))?.id
     }
@@ -125,7 +130,7 @@ final class CallController {
         self.activityID = nil
         if let phase {
             // Leave a failure visible briefly on the Lock Screen.
-            let final = CallActivityAttributes.ContentState(phase: phase, muted: false, detail: detail)
+            let final = CallActivityAttributes.ContentState(phase: phase, muted: false, detail: detail, modelName: modelName)
             await Self.end(ids: [activityID], content: .init(state: final, staleDate: nil), policy: .after(.now + 30))
         } else {
             await Self.end(ids: [activityID], content: nil, policy: .immediate)

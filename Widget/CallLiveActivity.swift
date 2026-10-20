@@ -16,7 +16,7 @@ private let openAppURL = URL(string: "owui://call")!
 struct CallLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: CallActivityAttributes.self) { context in
-            LockScreenView(state: context.state, modelName: context.attributes.modelName)
+            LockScreenView(state: context.state)
                 .widgetURL(openAppURL)
         } dynamicIsland: { context in
             let state = context.state
@@ -27,7 +27,7 @@ struct CallLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.center) {
                     VStack(spacing: 2) {
                         Text(state.phase.title).font(.headline)
-                        Text(state.detail ?? context.attributes.modelName)
+                        Text(state.detail ?? state.modelName)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -51,7 +51,6 @@ struct CallLiveActivity: Widget {
 
 private struct LockScreenView: View {
     let state: CallActivityAttributes.ContentState
-    let modelName: String
 
     var body: some View {
         VStack(spacing: 10) {
@@ -59,7 +58,7 @@ private struct LockScreenView: View {
                 PhaseIcon(phase: state.phase).font(.title3)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(state.phase.title).font(.headline)
-                    Text(state.detail ?? modelName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Text(state.detail ?? state.modelName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer()
                 if state.muted {

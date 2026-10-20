@@ -8,9 +8,9 @@ struct CallActivityAttributes: ActivityAttributes {
         var muted: Bool
         /// Short status line, e.g. the last error. Never the transcript.
         var detail: String?
+        /// Known only after the model list loads, which happens after the activity starts.
+        var modelName: String
     }
-
-    var modelName: String
 }
 
 enum CallPhase: String, Codable, Hashable {
