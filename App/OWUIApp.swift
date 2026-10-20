@@ -89,7 +89,17 @@ struct RootView: View {
             // (`devicectl device process launch --payload-url owui://call/start`).
             Log.call.info("open url \(url.absoluteString, privacy: .public)")
             switch (url.host(), url.path()) {
-            case ("call", "/start"): Task { try? await calls.begin(settings: settings, source: .app) }
+            case ("call", "/start"):
+                // `?hangup=N`: end the call after N seconds, so one launch is enough for a test.
+                let hangup = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                    .queryItems?.first { $0.name == "hangup" }?.value.flatMap(Double.init)
+                Task {
+                    try? await calls.begin(settings: settings, source: .app)
+                    if let hangup {
+                        try? await Task.sleep(for: .seconds(hangup))
+                        calls.end()
+                    }
+                }
             case ("call", "/end"): calls.end()
             default: break
             }

@@ -104,6 +104,9 @@ final class SocketDelegator: Delegator {
     private var timedOut: Set<String> = []
     /// Why the last `connect()` failed, for diagnostics.
     private(set) var lastFailure: String?
+    /// Ends a pending `connect()`; `close()` uses it because removing the handlers would
+    /// otherwise leave the connect waiting for its timeout.
+    private var cancelConnect: (() -> Void)?
     private var updates: [String: @MainActor (JSON) -> Void] = [:]
     private var taskIDs: [String: [String]] = [:]
 
@@ -112,6 +115,11 @@ final class SocketDelegator: Delegator {
         manager = SocketManager(socketURL: client.server, config: [
             .path("/ws/socket.io/"),
             .forceWebsockets(true),
+            // Apple's URLSessionWebSocketTask instead of Starscream's own engine (TCPTransport):
+            // against the test server the custom engine hangs after "Handshaking" forever, while the
+            // native one connects in ~0.15 s, as does the realtime WebSocket (device test 4).
+            // OWUI accepts only the websocket transport (polling: 400 "Invalid transport").
+            .useCustomEngine(false),
             .reconnects(true),
             .reconnectWait(1),
             .reconnectWaitMax(5),
@@ -134,13 +142,20 @@ final class SocketDelegator: Delegator {
         let socket = socket
         let token = client.token
         var handlers: [UUID] = []
-        defer { handlers.forEach(socket.off(id:)) }
+        defer {
+            handlers.forEach(socket.off(id:))
+            cancelConnect = nil
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             var resumed = false
             func finish(_ error: Error?) {
                 guard !resumed else { return }
                 resumed = true
                 if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+            cancelConnect = {
+                if !resumed { self.lastFailure = "closed" }
+                finish(DelegationError.socketUnavailable)
             }
             handlers.append(socket.on(clientEvent: .connect) { _, _ in
                 MainActor.assumeIsolated { finish(nil) }
@@ -214,6 +229,7 @@ final class SocketDelegator: Delegator {
     }
 
     func close() {
+        cancelConnect?()
         waiters.values.forEach { $0.resume() }
         waiters.removeAll()
         socket.removeAllHandlers()
