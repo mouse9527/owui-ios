@@ -75,17 +75,18 @@ final class CallController {
         do {
             guard await AVAudioApplication.requestRecordPermission() else { throw CallError.microphone }
             guard generation == self.generation else { return }
-            let audio = CallAudio()
-            try audio.start()
-            self.audio = audio
             modelName = target.modelID ?? settings.defaultModelID ?? ""
-            // AppIntents asserts (crashing the app) when an AudioRecordingIntent returns with an
-            // active audio session but no Live Activity: "AudioRecordingIntent was performed with
-            // an active audio session but without a Live Activity" (PerformActionExecutorTask.swift:889,
-            // read from the iOS 27.0.1 binary; device crash 16:22). Never return in that state.
+            // Live Activity first, then recording. AppIntents traps when an AudioRecordingIntent
+            // returns with an active audio session but no Live Activity ("AudioRecordingIntent was
+            // performed with an active audio session but without a Live Activity",
+            // PerformActionExecutorTask.swift:889, iOS 27.0.1; device crash 16:22). So from an
+            // intent, a refused activity means no recording at all, and perform() reports why.
             if let failure = startActivity(source: source), source == .intent {
                 throw CallError.liveActivity(failure)
             }
+            let audio = CallAudio()
+            try audio.start()
+            self.audio = audio
         } catch {
             fail(error.localizedDescription)
             throw error
