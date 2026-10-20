@@ -20,6 +20,8 @@ final class CallAudio {
 
     var onCapture: ((Data) -> Void)?
     var onInterruption: ((String) -> Void)?
+    /// Fires on the main actor whenever queued playback finishes (the queue became empty).
+    var onPlaybackIdle: (() -> Void)?
 
     /// Paused playback keeps its queue; used while server VAD decides whether the user is really speaking.
     private(set) var isPaused = false
@@ -35,13 +37,16 @@ final class CallAudio {
     private var converter: AVAudioConverter?
     private var pending = Data()
 
-    /// Samples scheduled / rendered per item, for `conversation.item.truncate`.
-    private var scheduled: [(item: PlaybackItem, samples: Int)] = []
-    private var queuedSamples = 0
+    /// Samples scheduled and actually played back per item, for `conversation.item.truncate`.
+    /// Counted from buffer completions: the player's own clock keeps running while idle.
+    private var scheduled: [(item: PlaybackItem, samples: Int, played: Int)] = []
+    private var buffersInFlight = 0
+    /// Bumped by `clear()` so completions of dropped buffers are ignored.
+    private var generation = 0
     private var observers: [NSObjectProtocol] = []
 
-    var isPlaying: Bool { queuedSamples > renderedSamples && !isPaused }
-    var hasQueuedAudio: Bool { queuedSamples > renderedSamples }
+    var isPlaying: Bool { hasQueuedAudio && !isPaused }
+    var hasQueuedAudio: Bool { buffersInFlight > 0 }
 
     func start() throws {
         let session = AVAudioSession.sharedInstance()
@@ -91,8 +96,9 @@ final class CallAudio {
         engine.inputNode.removeTap(onBus: 0)
         player.stop()
         engine.stop()
+        generation += 1
         scheduled.removeAll()
-        queuedSamples = 0
+        buffersInFlight = 0
         pending.removeAll()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
@@ -111,10 +117,13 @@ final class CallAudio {
         if let last = scheduled.last, last.item == item {
             scheduled[scheduled.count - 1].samples += count
         } else {
-            scheduled.append((item, count))
+            scheduled.append((item, count, 0))
         }
-        queuedSamples += count
-        player.scheduleBuffer(buffer)
+        buffersInFlight += 1
+        let generation = generation
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor in self?.played(count, for: item, generation: generation) }
+        }
         if !isPaused, !player.isPlaying { player.play() }
     }
 
@@ -125,26 +134,27 @@ final class CallAudio {
     }
 
     /// Drops queued audio and reports how much of each item was actually heard.
+    /// Granularity is one network chunk (whatever the provider sent per delta).
     func clear() -> [(item: PlaybackItem, playedMs: Int)] {
-        var remaining = renderedSamples
-        let latency = AVAudioSession.sharedInstance().outputLatency
-        var result: [(PlaybackItem, Int)] = []
-        for entry in scheduled {
-            let played = min(entry.samples, max(0, remaining))
-            remaining -= entry.samples
-            let ms = max(0, Int(Double(played) / Self.sampleRate * 1000 - latency * 1000))
-            result.append((entry.item, ms))
-        }
+        let result = scheduled.map { ($0.item, Int(Double($0.played) / Self.sampleRate * 1000)) }
+        generation += 1
         player.stop()
         scheduled.removeAll()
-        queuedSamples = 0
+        buffersInFlight = 0
         if !isPaused { player.play() }
         return result
     }
 
-    private var renderedSamples: Int {
-        guard let nodeTime = player.lastRenderTime, let time = player.playerTime(forNodeTime: nodeTime) else { return 0 }
-        return Int(Double(time.sampleTime) * Self.sampleRate / time.sampleRate)
+    private func played(_ count: Int, for item: PlaybackItem, generation: Int) {
+        guard generation == self.generation else { return }
+        if let index = scheduled.firstIndex(where: { $0.item == item }) {
+            scheduled[index].played += count
+        }
+        buffersInFlight -= 1
+        if buffersInFlight == 0 {
+            scheduled.removeAll()
+            onPlaybackIdle?()
+        }
     }
 
     // MARK: Capture
