@@ -54,6 +54,10 @@ targets:
         NSSupportsLiveActivities: true
         NSMicrophoneUsageDescription: 语音通话和网页里的语音输入需要使用麦克风。
         NSCameraUsageDescription: 在聊天里拍照上传需要使用相机。
+        # Lets the Live Activity "open" button and widget taps launch the app.
+        CFBundleURLTypes:
+          - CFBundleURLName: owui
+            CFBundleURLSchemes: [owui]
     dependencies:
       - target: OWUILiveActivity
       - package: SocketIO
@@ -68,6 +72,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(OWUI_BUNDLE_ID_PREFIX).owui.LiveActivity
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WIDGET_EXTENSION
     info:
       path: Widget/Info.plist
       properties:
