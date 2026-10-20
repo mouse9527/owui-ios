@@ -39,7 +39,9 @@ struct RootView: View {
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 8) {
                 Button {
-                    Task { await calls.toggle(settings: settings) }
+                    // Foreground counterpart of the Action button: same start path, so the
+                    // Diagnostics section can compare the two.
+                    Task { try? await calls.toggle(settings: settings, source: .app) }
                 } label: {
                     Image(systemName: calls.isActive ? "phone.down.fill" : "phone.fill")
                         .padding(10)

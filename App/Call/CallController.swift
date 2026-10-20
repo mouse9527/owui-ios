@@ -3,23 +3,39 @@ import AVFoundation
 import Foundation
 import Observation
 
-/// Owns the current voice call: checks preconditions, starts a fresh `BridgeCall` per call and
-/// mirrors its state to the Live Activity. Shared by the in-app button and the App Intents.
+/// Owns the current voice call: checks preconditions, starts recording and the Live Activity,
+/// then runs a fresh `BridgeCall` in the background. Shared by the in-app button and the App Intents.
 @MainActor
 @Observable
 final class CallController {
     static let shared = CallController()
 
+    /// Where a call was started from; shown in Diagnostics to tell background-start problems
+    /// (Action button) apart from Live Activity problems (in-app button, app in foreground).
+    enum Source: String {
+        case app = "App 内按钮"
+        case intent = "操作按钮 / 快捷指令"
+    }
+
     private(set) var call: BridgeCall?
     private(set) var lastError: String?
     /// The chat of the last call, so the web view can open it afterwards.
     private(set) var lastChatID: String?
+    /// True from `begin` until the call ends, including while the network setup runs.
+    private(set) var isStarting = false
 
     /// Only the id is kept: `Activity` is not Sendable, so it is looked up where it is used.
     private var activityID: String?
     private var modelName = ""
+    private var audio: CallAudio?
+    private var setup: Task<Void, Never>?
+    /// Activity updates and ends are applied in order.
+    private var activityQueue: Task<Void, Never>?
+    /// Bumped by `end()`, so a `begin` still awaiting the permission check stops there.
+    private var generation = 0
 
     var isActive: Bool {
+        if isStarting { return true }
         guard let phase = call?.phase else { return false }
         return phase != .idle && !phase.isFailed
     }
@@ -34,43 +50,52 @@ final class CallController {
         }
     }
 
-    func toggle(settings: AppSettings) async {
-        if isActive { end() } else { await start(settings: settings) }
+    func toggle(settings: AppSettings, source: Source) async throws {
+        if isActive { end() } else { try await begin(settings: settings, source: source) }
     }
 
-    func start(settings: AppSettings) async {
+    /// Starts recording and the Live Activity, then returns; the network setup and the call itself
+    /// run in a task. An `AudioRecordingIntent` must start a Live Activity when recording begins,
+    /// and its `perform()` must not wait for the whole call (device test 1: shortcut timed out).
+    func begin(settings: AppSettings, source: Source) async throws {
         guard !isActive else { return }
         lastError = nil
+        isStarting = true
+        generation += 1
+        let generation = generation
+        Log.call.info("begin from \(source.rawValue, privacy: .public)")
+        Diagnostics.shared.record("call", "开始通话（\(source.rawValue)）")
         do {
-            // From the Action button the app is in the background: no permission prompt can appear,
-            // and the system expects the Live Activity and recording to start promptly. So check
-            // the microphone and show the activity before any network round trip.
             guard await AVAudioApplication.requestRecordPermission() else { throw CallError.microphone }
-            modelName = ""
-            startActivity()
-            let configuration = try await configuration(from: settings)
-            modelName = configuration.model.name
-            let call = BridgeCall()
-            call.onChange = { [weak self, weak call] in
-                guard let self, let call, self.call === call else { return }
-                self.callChanged(call)
-            }
-            self.call = call
-            await updateActivity()
-            await call.start(configuration)
+            guard generation == self.generation else { return }
+            let audio = CallAudio()
+            try audio.start()
+            self.audio = audio
+            modelName = settings.defaultModelID ?? ""
+            startActivity(source: source)
         } catch {
-            lastError = error.localizedDescription
-            await endActivity(phase: .failed, detail: lastError)
+            fail(error.localizedDescription)
+            throw error
         }
+        setup = Task { await run(settings: settings) }
     }
 
     func end() {
-        guard let call else { return }
-        lastChatID = call.chatID ?? lastChatID
-        call.onChange = nil
-        self.call = nil
-        call.end()
-        Task { await endActivity(phase: nil, detail: nil) }
+        Log.call.info("end")
+        generation += 1
+        setup?.cancel()
+        setup = nil
+        isStarting = false
+        if let call {
+            lastChatID = call.chatID ?? lastChatID
+            call.onChange = nil
+            self.call = nil
+            call.end()
+        } else {
+            audio?.stop()
+        }
+        audio = nil
+        enqueueActivity { await self.endActivity(phase: nil, detail: nil) }
     }
 
     func toggleMute() {
@@ -83,6 +108,27 @@ final class CallController {
 
     // MARK: Private
 
+    private func run(settings: AppSettings) async {
+        guard let audio else { return }
+        do {
+            let configuration = try await configuration(from: settings)
+            guard !Task.isCancelled, isStarting else { return }
+            modelName = configuration.model.name
+            let call = BridgeCall(audio: audio)
+            call.onChange = { [weak self, weak call] in
+                guard let self, let call, self.call === call else { return }
+                self.callChanged(call)
+            }
+            self.call = call
+            isStarting = false
+            enqueueActivity { await self.updateActivity() }
+            await call.start(configuration)
+        } catch {
+            guard !Task.isCancelled else { return }
+            fail(error.localizedDescription)
+        }
+    }
+
     private func configuration(from settings: AppSettings) async throws -> BridgeCall.Configuration {
         guard let server = settings.serverURL else { throw CallError.noServer }
         guard let token = settings.token else { throw OWUIError.notSignedIn }
@@ -93,41 +139,87 @@ final class CallController {
         return .init(client: client, model: model, delegation: settings.delegationMode)
     }
 
+    private func fail(_ message: String) {
+        Log.call.error("call failed before start: \(message, privacy: .public)")
+        Diagnostics.shared.record("call", message, error: true)
+        lastError = message
+        isStarting = false
+        if call == nil {
+            audio?.stop()
+            audio = nil
+        }
+        enqueueActivity { await self.endActivity(phase: .failed, detail: message) }
+    }
+
     private func callChanged(_ call: BridgeCall) {
         if case .failed(let message) = call.phase {
             lastError = message
             lastChatID = call.chatID ?? lastChatID
             self.call = nil
-            Task { await endActivity(phase: .failed, detail: message) }
+            audio = nil
+            enqueueActivity { await self.endActivity(phase: .failed, detail: message) }
             return
         }
         if call.chatID != nil { lastChatID = call.chatID }
-        Task { await updateActivity() }
+        enqueueActivity { await self.updateActivity() }
     }
+
+    // MARK: Live Activity
 
     private var state: CallActivityAttributes.ContentState {
         .init(phase: phase, muted: call?.muted ?? false, detail: call?.awaitingApproval == true ? "请到聊天里确认" : nil, modelName: modelName)
     }
 
-    private func startActivity() {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-        let stale = Activity<CallActivityAttributes>.activities.map(\.id)
-        Task { await Self.end(ids: stale, content: nil, policy: .immediate) }
-        activityID = (try? Activity.request(
-            attributes: CallActivityAttributes(),
-            content: .init(state: state, staleDate: nil)
-        ))?.id
+    private func enqueueActivity(_ work: @escaping @MainActor () async -> Void) {
+        let previous = activityQueue
+        activityQueue = Task {
+            await previous?.value
+            await work()
+        }
+    }
+
+    /// Synchronous on purpose: it must happen inside the intent's `perform()`, right after recording starts.
+    private func startActivity(source: Source) {
+        let enabled = ActivityAuthorizationInfo().areActivitiesEnabled
+        let existing = Activity<CallActivityAttributes>.activities
+        Log.activity.info("request: areActivitiesEnabled=\(enabled), existing=\(existing.count), source=\(source.rawValue, privacy: .public)")
+        if !enabled {
+            Diagnostics.shared.record("activity", "areActivitiesEnabled=false（系统设置里关了实时活动，或系统暂不允许）", error: true)
+        }
+        let stale = existing.map(\.id)
+        if !stale.isEmpty {
+            enqueueActivity { await Self.end(ids: stale, content: nil, policy: .immediate) }
+        }
+        do {
+            let activity = try Activity.request(
+                attributes: CallActivityAttributes(),
+                content: .init(state: state, staleDate: nil)
+            )
+            activityID = activity.id
+            Log.activity.info("request ok id=\(activity.id, privacy: .public) state=\(String(describing: activity.activityState), privacy: .public)")
+            Diagnostics.shared.record("activity", "已请求实时活动（\(source.rawValue)），状态 \(activity.activityState)")
+        } catch {
+            activityID = nil
+            let message = describeActivityError(error)
+            Log.activity.error("request failed: \(message, privacy: .public)")
+            Diagnostics.shared.record("activity", "请求实时活动失败（\(source.rawValue)）：\(message)", error: true)
+        }
     }
 
     private func updateActivity() async {
         guard let activityID else { return }
         let content = ActivityContent(state: state, staleDate: nil)
-        await Self.update(id: activityID, content: content)
+        if await !Self.update(id: activityID, content: content) {
+            Log.activity.error("update: activity \(activityID, privacy: .public) no longer exists")
+            Diagnostics.shared.record("activity", "更新时找不到实时活动（可能被系统结束）", error: true)
+            self.activityID = nil
+        }
     }
 
     private func endActivity(phase: CallPhase?, detail: String?) async {
         guard let activityID else { return }
         self.activityID = nil
+        Log.activity.info("end id=\(activityID, privacy: .public) phase=\(phase?.rawValue ?? "none", privacy: .public)")
         if let phase {
             // Leave a failure visible briefly on the Lock Screen.
             let final = CallActivityAttributes.ContentState(phase: phase, muted: false, detail: detail, modelName: modelName)
@@ -137,8 +229,11 @@ final class CallController {
         }
     }
 
-    nonisolated private static func update(id: String, content: ActivityContent<CallActivityAttributes.ContentState>) async {
-        await Activity<CallActivityAttributes>.activities.first { $0.id == id }?.update(content)
+    /// Returns false if the activity no longer exists.
+    nonisolated private static func update(id: String, content: ActivityContent<CallActivityAttributes.ContentState>) async -> Bool {
+        guard let activity = Activity<CallActivityAttributes>.activities.first(where: { $0.id == id }) else { return false }
+        await activity.update(content)
+        return true
     }
 
     nonisolated private static func end(
@@ -160,7 +255,7 @@ enum CallError: LocalizedError {
         case .noServer: "先在设置里填写服务器地址。"
         case .noModel: "先在设置里选择语音通话的模型。"
         case .directModel: "这个模型是直连模型，不能用于语音通话。"
-        case .microphone: "没有麦克风权限。请在系统设置里允许。"
+        case .microphone: "没有麦克风权限。请先在 App 里点一次通话按钮并允许麦克风。"
         }
     }
 }

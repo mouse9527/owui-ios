@@ -5,8 +5,10 @@ import AppIntents
 // The widget extension gets the no-op shim at the bottom of this file.
 
 /// Action button / Shortcuts entry. Starts a call in the background without opening the app;
-/// pressing it again during a call hangs up.
-struct StartCallIntent: AudioRecordingIntent {
+/// pressing it again during a call hangs up. `perform()` returns once recording and the Live
+/// Activity have started (required for `AudioRecordingIntent`); the call continues in the app.
+/// `AudioPlaybackIntent` tells the system the intent plays audio, so it avoids interrupting it.
+struct StartCallIntent: AudioRecordingIntent, AudioPlaybackIntent {
     static let title: LocalizedStringResource = "语音通话"
     static let description = IntentDescription("开始或结束与 Open WebUI 的语音通话，不切换到 App。")
     static let supportedModes: IntentModes = .background

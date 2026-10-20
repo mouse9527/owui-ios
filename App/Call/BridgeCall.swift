@@ -33,7 +33,8 @@ final class BridgeCall {
     private var connected = false
     private var lastPong = Date.distantPast
     private var heartbeat: Task<Void, Never>?
-    private let audio = CallAudio()
+    /// Started by `CallController` before this call exists, so recording begins inside the intent.
+    private let audio: CallAudio
     private var delegator: Delegator?
     private var features: JSON = [:]
     private var voiceModel = ""
@@ -113,6 +114,10 @@ final class BridgeCall {
 
     // MARK: Lifecycle
 
+    init(audio: CallAudio) {
+        self.audio = audio
+    }
+
     func start(_ configuration: Configuration) async {
         guard phase == .idle || phase.isFailed else { return }
         self.configuration = configuration
@@ -120,14 +125,14 @@ final class BridgeCall {
         let session = session
         setPhase(.connecting)
         do {
-            // Start recording first (see CallController.start); frames are dropped until bridge.ready.
+            // Audio is already recording (CallController.begin); frames are dropped until bridge.ready.
             audio.onInterruption = { [weak self] message in self?.fail(message) }
-            try audio.start()
             let client = configuration.client
             async let featuresTask = client.features(for: configuration.model)
             async let chatTask = client.createChat(title: "语音通话", modelID: configuration.model.id)
             (features, chatID) = try await (featuresTask, chatTask)
             guard session == self.session else { return }
+            Log.call.info("chat created, delegation=\(configuration.delegation.rawValue, privacy: .public)")
 
             delegator = switch configuration.delegation {
             case .socket: SocketDelegator(client: client)
@@ -138,6 +143,8 @@ final class BridgeCall {
                     try await socket.connect()
                 } catch {
                     // Socket unreachable: keep the call usable with model tools only.
+                    Log.call.error("socket.io connect failed, falling back to HTTP: \(error.localizedDescription, privacy: .public)")
+                    Diagnostics.shared.record("call", "实时通道连不上，已降级为 HTTP：\(error.localizedDescription)", error: true)
                     socket.close()
                     delegator = HTTPDelegator(client: client)
                 }
@@ -153,6 +160,7 @@ final class BridgeCall {
             }
             try openSocket(client: client, model: configuration.model)
         } catch {
+            Log.call.error("start failed: \(error.localizedDescription, privacy: .public)")
             if session == self.session { fail(error.localizedDescription) }
         }
     }
@@ -280,6 +288,7 @@ final class BridgeCall {
             lastPong = Date()
             return
         case "bridge.ready":
+            Log.call.info("bridge.ready")
             guard event["sample_rate"] == 24000 else { fail("采样率不对。"); return }
             voiceModel = event["model"].string ?? ""
             connected = true
@@ -636,6 +645,8 @@ final class BridgeCall {
 
     private func fail(_ message: String) {
         guard !phase.isFailed else { return }
+        Log.call.error("call failed: \(message, privacy: .public)")
+        Diagnostics.shared.record("call", message, error: true)
         phase = .failed(message)
         end()
         onChange?()

@@ -69,6 +69,8 @@ struct SettingsView: View {
                 } footer: {
                     Text("降级模式不连实时通道：网页搜索、记忆等内置工具不可用，只用模型配置的工具。完整模式出问题时再切换。")
                 }
+
+                DiagnosticsSection()
             }
             .navigationTitle("设置")
             .toolbar {

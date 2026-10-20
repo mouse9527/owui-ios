@@ -122,19 +122,37 @@ final class SocketDelegator: Delegator {
         }
     }
 
-    func connect() async throws {
+    /// Always returns: the library's own timeout handler only fires while the status is still
+    /// `.connecting` / `.notConnected` (`SocketIOClient.connect(withPayload:timeoutAfter:)`), so a
+    /// connection that fails into `.disconnected` would otherwise never resume. Device test 1: the
+    /// Action button intent hung until the shortcut timed out.
+    func connect(timeout: TimeInterval = 10) async throws {
         if socket.status == .connected, socket.sid != nil { return }
+        let socket = socket
+        let token = client.token
+        var handlers: [UUID] = []
+        defer { handlers.forEach(socket.off(id:)) }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             var resumed = false
-            socket.once(clientEvent: .connect) { _, _ in
+            func finish(_ error: Error?) {
                 guard !resumed else { return }
                 resumed = true
-                continuation.resume()
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
             }
-            socket.connect(withPayload: ["token": client.token], timeoutAfter: 15) {
-                guard !resumed else { return }
-                resumed = true
-                continuation.resume(throwing: DelegationError.socketUnavailable)
+            handlers.append(socket.on(clientEvent: .connect) { _, _ in
+                MainActor.assumeIsolated { finish(nil) }
+            })
+            handlers.append(socket.on(clientEvent: .error) { data, _ in
+                Log.call.error("socket.io error: \(String(describing: data.first), privacy: .public)")
+                MainActor.assumeIsolated { finish(DelegationError.socketUnavailable) }
+            })
+            handlers.append(socket.on(clientEvent: .disconnect) { _, _ in
+                MainActor.assumeIsolated { finish(DelegationError.socketUnavailable) }
+            })
+            socket.connect(withPayload: ["token": token])
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(timeout))
+                finish(DelegationError.socketUnavailable)
             }
         }
     }
