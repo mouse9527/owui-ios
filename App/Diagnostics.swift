@@ -17,21 +17,67 @@ enum Log {
 final class Diagnostics {
     static let shared = Diagnostics()
 
-    struct Entry: Identifiable {
-        let id = UUID()
-        let date = Date()
+    struct Entry: Identifiable, Codable {
+        var id = UUID()
+        var date = Date()
         let category: String
         let message: String
         let isError: Bool
+        /// Read back from disk: written by an earlier run (possibly one that crashed).
+        var previousRun = false
     }
 
     private(set) var entries: [Entry] = []
     private(set) var lastActivityError: String?
 
+    /// Each entry is also appended to a file right away, so what happened just before a crash
+    /// (e.g. an Action-button start in the background) is visible after relaunch.
+    private let file: URL? = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+        .appending(path: "diagnostics.jsonl")
+
+    private init() {
+        guard let file, let text = try? String(contentsOf: file, encoding: .utf8) else { return }
+        let decoder = JSONDecoder()
+        entries = text.split(separator: "\n").suffix(50).reversed().compactMap {
+            var entry = try? decoder.decode(Entry.self, from: Data($0.utf8))
+            entry?.previousRun = true
+            return entry
+        }
+        lastActivityError = entries.first { $0.isError && $0.category == "activity" }?.message
+    }
+
     func record(_ category: String, _ message: String, error: Bool = false) {
-        entries.insert(Entry(category: category, message: message, isError: error), at: 0)
+        let entry = Entry(category: category, message: message, isError: error)
+        entries.insert(entry, at: 0)
         if entries.count > 50 { entries.removeLast(entries.count - 50) }
         if error, category == "activity" { lastActivityError = message }
+        append(entry)
+    }
+
+    func clear() {
+        entries.removeAll()
+        lastActivityError = nil
+        if let file { try? FileManager.default.removeItem(at: file) }
+    }
+
+    private func append(_ entry: Entry) {
+        guard let file, var line = try? JSONEncoder().encode(entry) else { return }
+        line.append(0x0A)
+        let manager = FileManager.default
+        if !manager.fileExists(atPath: file.path) {
+            try? manager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            manager.createFile(atPath: file.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: file) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: line)
+        // Keep the file small: rewrite the last 200 lines once it passes ~64 KB.
+        if let size = try? handle.offset(), size > 64_000,
+           let text = try? String(contentsOf: file, encoding: .utf8) {
+            let kept = text.split(separator: "\n").suffix(200).joined(separator: "\n") + "\n"
+            try? kept.write(to: file, atomically: true, encoding: .utf8)
+        }
     }
 
     /// Live state of ActivityKit, read on demand.

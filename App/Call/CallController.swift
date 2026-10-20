@@ -79,7 +79,13 @@ final class CallController {
             try audio.start()
             self.audio = audio
             modelName = target.modelID ?? settings.defaultModelID ?? ""
-            startActivity(source: source)
+            // AppIntents asserts (crashing the app) when an AudioRecordingIntent returns with an
+            // active audio session but no Live Activity: "AudioRecordingIntent was performed with
+            // an active audio session but without a Live Activity" (PerformActionExecutorTask.swift:889,
+            // read from the iOS 27.0.1 binary; device crash 16:22). Never return in that state.
+            if let failure = startActivity(source: source), source == .intent {
+                throw CallError.liveActivity(failure)
+            }
         } catch {
             fail(error.localizedDescription)
             throw error
@@ -206,16 +212,14 @@ final class CallController {
     }
 
     /// Synchronous on purpose: it must happen inside the intent's `perform()`, right after recording starts.
-    private func startActivity(source: Source) {
+    /// Returns the failure reason, or nil when the activity was requested.
+    @discardableResult
+    private func startActivity(source: Source) -> String? {
         let enabled = ActivityAuthorizationInfo().areActivitiesEnabled
         let existing = Activity<CallActivityAttributes>.activities
         Log.activity.info("request: areActivitiesEnabled=\(enabled), existing=\(existing.count), source=\(source.rawValue, privacy: .public)")
         if !enabled {
             Diagnostics.shared.record("activity", "areActivitiesEnabled=false（系统设置里关了实时活动，或系统暂不允许）", error: true)
-        }
-        let stale = existing.map(\.id)
-        if !stale.isEmpty {
-            enqueueActivity { await Self.end(ids: stale, content: nil, policy: .immediate) }
         }
         do {
             let activity = try Activity.request(
@@ -225,11 +229,18 @@ final class CallController {
             activityID = activity.id
             Log.activity.info("request ok id=\(activity.id, privacy: .public) state=\(String(describing: activity.activityState), privacy: .public)")
             Diagnostics.shared.record("activity", "已请求实时活动（\(source.rawValue)），状态 \(activity.activityState)")
+            // End leftovers only after the new one exists, so there is never a moment without one.
+            let stale = existing.map(\.id).filter { $0 != activity.id }
+            if !stale.isEmpty {
+                enqueueActivity { await Self.end(ids: stale, content: nil, policy: .immediate) }
+            }
+            return nil
         } catch {
             activityID = nil
             let message = describeActivityError(error)
             Log.activity.error("request failed: \(message, privacy: .public)")
             Diagnostics.shared.record("activity", "请求实时活动失败（\(source.rawValue)）：\(message)", error: true)
+            return message
         }
     }
 
@@ -276,6 +287,7 @@ final class CallController {
 
 enum CallError: LocalizedError {
     case noServer, noModel, directModel, microphone
+    case liveActivity(String)
 
     var errorDescription: String? {
         switch self {
@@ -283,6 +295,7 @@ enum CallError: LocalizedError {
         case .noModel: "先在设置里选择语音通话的模型。"
         case .directModel: "这个模型是直连模型，不能用于语音通话。"
         case .microphone: "没有麦克风权限。请先在 App 里点一次通话按钮并允许麦克风。"
+        case .liveActivity(let reason): "无法显示实时活动，通话没有开始：\(reason)"
         }
     }
 }

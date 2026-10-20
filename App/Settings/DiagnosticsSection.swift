@@ -25,9 +25,13 @@ struct DiagnosticsSection: View {
                 }
             }
             Button("刷新") { refresh() }
+            Button("清空记录", role: .destructive) {
+                diagnostics.clear()
+                refresh()
+            }
             ForEach(diagnostics.entries.prefix(20)) { entry in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(entry.date.formatted(date: .omitted, time: .standard)) · \(entry.category)")
+                    Text("\(entry.date.formatted(date: .omitted, time: .standard)) · \(entry.category)\(entry.previousRun ? " · 上次运行" : "")")
                         .font(.caption2).foregroundStyle(.secondary)
                     Text(entry.message).font(.caption)
                         .foregroundStyle(entry.isError ? .red : .primary)
