@@ -8,6 +8,11 @@ options:
   createIntermediateGroups: true
   generateEmptyDirectories: true
 
+packages:
+  SocketIO:
+    url: https://github.com/socketio/socket.io-client-swift
+    exactVersion: 16.1.1
+
 configFiles:
   Debug: Config/Base.xcconfig
   Release: Config/Base.xcconfig
@@ -51,6 +56,7 @@ targets:
         NSCameraUsageDescription: 在聊天里拍照上传需要使用相机。
     dependencies:
       - target: OWUILiveActivity
+      - package: SocketIO
 
   # Second (and last) App ID: free provisioning allows 10 per 7 days.
   OWUILiveActivity:
