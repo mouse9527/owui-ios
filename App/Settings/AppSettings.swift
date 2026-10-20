@@ -13,6 +13,7 @@ final class AppSettings {
         static let server = "serverURL"
         static let model = "defaultModelID"
         static let delegation = "callDelegationMode"
+        static let takeOverVoiceButton = "takeOverWebVoiceButton"
     }
 
     private let defaults: UserDefaults
@@ -35,6 +36,11 @@ final class AppSettings {
         didSet { defaults.set(delegationMode.rawValue, forKey: Key.delegation) }
     }
 
+    /// AC8: the web page's "Voice mode" button starts the native call instead of the web call.
+    var takeOverVoiceButton: Bool {
+        didSet { defaults.set(takeOverVoiceButton, forKey: Key.takeOverVoiceButton) }
+    }
+
     /// Token of the user signed in to the web page, if any.
     private(set) var token: String?
 
@@ -44,6 +50,7 @@ final class AppSettings {
         serverURL = server
         defaultModelID = defaults.string(forKey: Key.model)
         delegationMode = defaults.string(forKey: Key.delegation).flatMap(DelegationMode.init) ?? .socket
+        takeOverVoiceButton = defaults.object(forKey: Key.takeOverVoiceButton) as? Bool ?? true
         token = server.flatMap { TokenStore.load(for: $0) }
     }
 

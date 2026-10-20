@@ -61,13 +61,14 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Toggle("接管网页语音按钮", isOn: $settings.takeOverVoiceButton)
                     Picker("委派", selection: $settings.delegationMode) {
                         ForEach(DelegationMode.allCases) { Text($0.title).tag($0) }
                     }
                 } header: {
                     Text("高级")
                 } footer: {
-                    Text("降级模式不连实时通道：网页搜索、记忆等内置工具不可用，只用模型配置的工具。完整模式出问题时再切换。")
+                    Text("接管：聊天页输入框旁的「语音模式」按钮改用原生通话（灵动岛、锁屏不断），接在当前聊天、用当前模型；识别不到按钮时保持网页原样。降级模式不连实时通道：网页搜索、记忆等内置工具不可用，只用模型配置的工具。")
                 }
 
                 DiagnosticsSection()

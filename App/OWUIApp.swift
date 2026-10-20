@@ -21,9 +21,15 @@ struct RootView: View {
     var body: some View {
         Group {
             if let server = settings.serverURL {
-                ChatWebView(server: server, openPath: $webPath) { token in
-                    settings.updateToken(token, for: server)
-                }
+                ChatWebView(
+                    server: server,
+                    openPath: $webPath,
+                    takeOverVoiceButton: settings.takeOverVoiceButton,
+                    onToken: { token in settings.updateToken(token, for: server) },
+                    onVoiceButton: { request in
+                        Task { await calls.beginFromWeb(settings: settings, chatID: request.chatID, models: request.models) }
+                    }
+                )
                 .ignoresSafeArea(edges: .bottom)
             } else {
                 ContentUnavailableView {

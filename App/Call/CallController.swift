@@ -15,6 +15,13 @@ final class CallController {
     enum Source: String {
         case app = "App 内按钮"
         case intent = "操作按钮 / 快捷指令"
+        case webButton = "网页语音按钮"
+    }
+
+    /// AC8: continue the chat open in the web view with its model, instead of a new chat.
+    struct Target {
+        var chatID: String?
+        var modelID: String?
     }
 
     private(set) var call: BridgeCall?
@@ -57,7 +64,7 @@ final class CallController {
     /// Starts recording and the Live Activity, then returns; the network setup and the call itself
     /// run in a task. An `AudioRecordingIntent` must start a Live Activity when recording begins,
     /// and its `perform()` must not wait for the whole call (device test 1: shortcut timed out).
-    func begin(settings: AppSettings, source: Source) async throws {
+    func begin(settings: AppSettings, source: Source, target: Target = .init()) async throws {
         guard !isActive else { return }
         lastError = nil
         isStarting = true
@@ -71,13 +78,13 @@ final class CallController {
             let audio = CallAudio()
             try audio.start()
             self.audio = audio
-            modelName = settings.defaultModelID ?? ""
+            modelName = target.modelID ?? settings.defaultModelID ?? ""
             startActivity(source: source)
         } catch {
             fail(error.localizedDescription)
             throw error
         }
-        setup = Task { await run(settings: settings) }
+        setup = Task { await run(settings: settings, target: target) }
     }
 
     func end() {
@@ -108,10 +115,23 @@ final class CallController {
 
     // MARK: Private
 
-    private func run(settings: AppSettings) async {
+    /// The web page's voice button (AC8). During a call it only brings the call controls back.
+    func beginFromWeb(settings: AppSettings, chatID: String?, models: [String]) async {
+        guard !isActive else {
+            Diagnostics.shared.record("call", "网页语音按钮：已在通话中")
+            return
+        }
+        guard models.count <= 1 else {
+            lastError = "只能选一个模型才能语音通话。"
+            return
+        }
+        try? await begin(settings: settings, source: .webButton, target: .init(chatID: chatID, modelID: models.first))
+    }
+
+    private func run(settings: AppSettings, target: Target) async {
         guard let audio else { return }
         do {
-            let configuration = try await configuration(from: settings)
+            let configuration = try await configuration(from: settings, target: target)
             guard !Task.isCancelled, isStarting else { return }
             modelName = configuration.model.name
             let call = BridgeCall(audio: audio)
@@ -129,14 +149,21 @@ final class CallController {
         }
     }
 
-    private func configuration(from settings: AppSettings) async throws -> BridgeCall.Configuration {
+    /// Model: the one selected in the page, else the chat's saved model, else the Settings default.
+    private func configuration(from settings: AppSettings, target: Target) async throws -> BridgeCall.Configuration {
         guard let server = settings.serverURL else { throw CallError.noServer }
         guard let token = settings.token else { throw OWUIError.notSignedIn }
-        guard let modelID = settings.defaultModelID else { throw CallError.noModel }
         let client = OWUIClient(server: server, token: token)
+        var modelID = target.modelID
+        if modelID == nil, let chatID = target.chatID {
+            let models = try? await client.chat(chatID)["chat"]["models"].array.compactMap(\.string)
+            if models?.count == 1 { modelID = models?.first }
+        }
+        guard let modelID = modelID ?? settings.defaultModelID else { throw CallError.noModel }
         guard let model = try await client.models().first(where: { $0.id == modelID }) else { throw CallError.noModel }
         guard !model.direct else { throw CallError.directModel }
-        return .init(client: client, model: model, delegation: settings.delegationMode)
+        Log.call.info("model from \(target.modelID != nil ? "page" : (modelID == settings.defaultModelID ? "settings" : "chat"), privacy: .public), existing chat=\(target.chatID != nil)")
+        return .init(client: client, model: model, delegation: settings.delegationMode, chatID: target.chatID)
     }
 
     private func fail(_ message: String) {
