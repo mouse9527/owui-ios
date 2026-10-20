@@ -1,0 +1,82 @@
+# Generate the Xcode project with `xcodegen generate`; OWUI.xcodeproj is not committed.
+# Signing is configured in Config/Local.xcconfig (see Config/Local.xcconfig.example).
+name: OWUI
+
+options:
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: $(OWUI_DEVELOPMENT_TEAM)
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+
+targets:
+  OWUI:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(OWUI_BUNDLE_ID_PREFIX).owui
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: OWUI
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
+        NSSupportsLiveActivities: true
+        NSMicrophoneUsageDescription: 语音通话和网页里的语音输入需要使用麦克风。
+        NSCameraUsageDescription: 在聊天里拍照上传需要使用相机。
+    dependencies:
+      - target: OWUILiveActivity
+
+  # Second (and last) App ID: free provisioning allows 10 per 7 days.
+  OWUILiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Widget
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(OWUI_BUNDLE_ID_PREFIX).owui.LiveActivity
+    info:
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: OWUI
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+
+schemes:
+  OWUI:
+    build:
+      targets:
+        OWUI: all
+    run:
+      config: Debug
+    archive:
+      config: Release
