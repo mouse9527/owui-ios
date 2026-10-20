@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct OWUIApp: App {
-    @State private var settings = AppSettings()
+    @State private var settings = AppSettings.shared
 
     var body: some Scene {
         WindowGroup {
@@ -15,11 +15,13 @@ struct OWUIApp: App {
 struct RootView: View {
     @Environment(AppSettings.self) private var settings
     @State private var showingSettings = false
+    @State private var webPath: String?
+    private let calls = CallController.shared
 
     var body: some View {
         Group {
             if let server = settings.serverURL {
-                ChatWebView(server: server) { token in
+                ChatWebView(server: server, openPath: $webPath) { token in
                     settings.updateToken(token, for: server)
                 }
                 .ignoresSafeArea(edges: .bottom)
@@ -35,16 +37,37 @@ struct RootView: View {
             }
         }
         .overlay(alignment: .topTrailing) {
-            Button {
-                showingSettings = true
-            } label: {
-                Image(systemName: "gearshape")
-                    .padding(10)
-                    .background(.thinMaterial, in: Circle())
+            HStack(spacing: 8) {
+                Button {
+                    Task { await calls.toggle(settings: settings) }
+                } label: {
+                    Image(systemName: calls.isActive ? "phone.down.fill" : "phone.fill")
+                        .padding(10)
+                        .background(.thinMaterial, in: Circle())
+                }
+                .accessibilityLabel(calls.isActive ? "结束语音通话" : "开始语音通话")
+                .disabled(settings.serverURL == nil)
+
+                Button {
+                    showingSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .padding(10)
+                        .background(.thinMaterial, in: Circle())
+                }
+                .accessibilityLabel("设置")
             }
             .padding(.trailing, 12)
             .padding(.top, 4)
-            .accessibilityLabel("设置")
+        }
+        .overlay(alignment: .bottom) {
+            CallOverlay(controller: calls)
+                .padding(.bottom, 24)
+                .animation(.default, value: calls.isActive)
+        }
+        .onChange(of: calls.isActive) { wasActive, isActive in
+            // Show the call's transcript in the web UI once it ends.
+            if wasActive, !isActive, let chat = calls.lastChatID { webPath = "c/\(chat)" }
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()

@@ -6,6 +6,9 @@ import Observation
 @MainActor
 @Observable
 final class AppSettings {
+    /// One instance for the app UI and App Intents (which start calls without a SwiftUI scene).
+    static let shared = AppSettings()
+
     private enum Key {
         static let server = "serverURL"
         static let model = "defaultModelID"

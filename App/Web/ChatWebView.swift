@@ -5,6 +5,8 @@ import WebKit
 /// so voice calls can act as the same signed-in user without a second login.
 struct ChatWebView: UIViewRepresentable {
     let server: URL
+    /// Set to a path under the server (e.g. `c/<chat id>`) to navigate there; reset to nil once loaded.
+    @Binding var openPath: String?
     let onToken: @MainActor (String?) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(server: server, onToken: onToken) }
@@ -37,9 +39,14 @@ struct ChatWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.onToken = onToken
-        guard context.coordinator.server != server else { return }
-        context.coordinator.server = server
-        webView.load(URLRequest(url: server))
+        if context.coordinator.server != server {
+            context.coordinator.server = server
+            webView.load(URLRequest(url: server))
+        }
+        if let path = openPath {
+            webView.load(URLRequest(url: server.appending(path: path)))
+            DispatchQueue.main.async { openPath = nil }
+        }
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
