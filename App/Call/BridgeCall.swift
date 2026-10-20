@@ -142,11 +142,16 @@ final class BridgeCall {
             case .httpFallback: HTTPDelegator(client: client)
             }
             if let socket = delegator as? SocketDelegator {
+                let started = Date()
                 do {
                     try await socket.connect()
+                    guard session == self.session else { return }
+                    Log.call.info("socket.io connected in \(Date().timeIntervalSince(started), format: .fixed(precision: 2))s")
                 } catch {
+                    // end() closes this socket while it connects: that is not a failure to fall back from.
+                    guard session == self.session else { return }
                     // Socket unreachable: keep the call usable with model tools only.
-                    Log.call.error("socket.io connect failed, falling back to HTTP: \(error.localizedDescription, privacy: .public)")
+                    Log.call.error("socket.io connect failed after \(Date().timeIntervalSince(started), format: .fixed(precision: 2))s, falling back to HTTP: \(error.localizedDescription, privacy: .public)")
                     Diagnostics.shared.record("call", "实时通道连不上，已降级为 HTTP：\(error.localizedDescription)", error: true)
                     socket.close()
                     delegator = HTTPDelegator(client: client)

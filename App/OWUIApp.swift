@@ -83,5 +83,17 @@ struct RootView: View {
         .onAppear {
             if settings.serverURL == nil { showingSettings = true }
         }
+        .onOpenURL { url in
+            #if DEBUG
+            // Debug builds only: lets a device test drive a call without touching the phone
+            // (`devicectl device process launch --payload-url owui://call/start`).
+            Log.call.info("open url \(url.absoluteString, privacy: .public)")
+            switch (url.host(), url.path()) {
+            case ("call", "/start"): Task { try? await calls.begin(settings: settings, source: .app) }
+            case ("call", "/end"): calls.end()
+            default: break
+            }
+            #endif
+        }
     }
 }

@@ -146,12 +146,14 @@ final class SocketDelegator: Delegator {
                 Log.call.error("socket.io error: \(String(describing: data.first), privacy: .public)")
                 MainActor.assumeIsolated { finish(DelegationError.socketUnavailable) }
             })
-            handlers.append(socket.on(clientEvent: .disconnect) { _, _ in
+            handlers.append(socket.on(clientEvent: .disconnect) { data, _ in
+                Log.call.info("socket.io disconnect while connecting: \(String(describing: data.first), privacy: .public)")
                 MainActor.assumeIsolated { finish(DelegationError.socketUnavailable) }
             })
             socket.connect(withPayload: ["token": token])
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(timeout))
+                if !resumed { Log.call.error("socket.io connect timed out after \(timeout)s, status=\(String(describing: socket.status), privacy: .public)") }
                 finish(DelegationError.socketUnavailable)
             }
         }
