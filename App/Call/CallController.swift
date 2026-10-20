@@ -96,6 +96,7 @@ final class CallController {
 
     func end() {
         Log.call.info("end")
+        if isActive { Diagnostics.shared.record("call", "挂断（阶段：\(isStarting ? "准备中" : phase.title)）") }
         generation += 1
         setup?.cancel()
         setup = nil

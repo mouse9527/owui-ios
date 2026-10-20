@@ -46,6 +46,28 @@ enum OWUIError: LocalizedError {
     }
 }
 
+/// Short, specific description for diagnostics: URLError code / name instead of a generic message.
+func describeNetworkError(_ error: Error) -> String {
+    if let error = error as? URLError {
+        return "URLError \(error.code.rawValue)（\(error.localizedDescription)）"
+    }
+    let ns = error as NSError
+    return ns.domain == NSURLErrorDomain ? "URLError \(ns.code)（\(ns.localizedDescription)）" : error.localizedDescription
+}
+
+/// One session for every request a call makes (HTTP and the realtime WebSocket).
+/// Fails fast instead of waiting for connectivity, and allows constrained / expensive networks so
+/// Low Data Mode or cellular does not hold a call at 连接中 (device test 4).
+let callURLSession: URLSession = {
+    let configuration = URLSessionConfiguration.default
+    configuration.waitsForConnectivity = false
+    configuration.timeoutIntervalForRequest = 15
+    configuration.allowsConstrainedNetworkAccess = true
+    configuration.allowsExpensiveNetworkAccess = true
+    configuration.allowsCellularAccess = true
+    return URLSession(configuration: configuration)
+}()
+
 /// Plain HTTP calls to OWUI as the signed-in user.
 struct OWUIClient: Sendable {
     let server: URL
@@ -147,7 +169,7 @@ struct OWUIClient: Sendable {
     }
 
     private func send(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await callURLSession.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else { throw OWUIError.http(status) }
         return data

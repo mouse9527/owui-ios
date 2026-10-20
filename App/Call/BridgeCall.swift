@@ -40,7 +40,11 @@ final class BridgeCall {
     /// Started by `CallController` before this call exists, so recording begins inside the intent.
     private let audio: CallAudio
     private var delegator: Delegator?
+    private var preparing: Task<Void, Never>?
     private var features: JSON = [:]
+    private var callStarted = Date()
+    private var readyTimeout: Task<Void, Never>?
+    private var receivedMessages = 0
     private var voiceModel = ""
     private let callID = UUID().uuidString.lowercased()
 
@@ -127,50 +131,75 @@ final class BridgeCall {
         self.configuration = configuration
         session += 1
         let session = session
+        callStarted = Date()
         setPhase(.connecting)
+        // Audio is already recording (CallController.begin); frames are dropped until bridge.ready.
+        audio.onInterruption = { [weak self] message in self?.fail(message) }
+        audio.onCapture = { [weak self] pcm in self?.sendAudio(pcm) }
+        // Queued results wait for playback to finish (web: AudioWorklet `playback` reports).
+        audio.onPlaybackIdle = { [weak self] in
+            guard let self else { return }
+            if activeResponse.isEmpty, !responseRequested { speakingResponses.removeAll() }
+            updatePhase()
+            flush()
+        }
+        chatID = configuration.chatID
+        // The realtime WebSocket needs only the token and model, so it opens right away. Chat-model
+        // features and the Socket.IO session are needed only for delegation and are prepared in
+        // parallel; a slow socket no longer holds the call at 连接中 (device test 4).
+        preparing = Task { [weak self] in await self?.prepareDelegation(configuration, session: session) }
         do {
-            // Audio is already recording (CallController.begin); frames are dropped until bridge.ready.
-            audio.onInterruption = { [weak self] message in self?.fail(message) }
-            let client = configuration.client
-            chatID = configuration.chatID
-            features = try await client.features(for: configuration.model)
-            guard session == self.session else { return }
-            Log.call.info("prepared, delegation=\(configuration.delegation.rawValue, privacy: .public), existing chat=\(self.chatID != nil)")
-
-            delegator = switch configuration.delegation {
-            case .socket: SocketDelegator(client: client)
-            case .httpFallback: HTTPDelegator(client: client)
-            }
-            if let socket = delegator as? SocketDelegator {
-                let started = Date()
-                do {
-                    try await socket.connect()
-                    guard session == self.session else { return }
-                    Log.call.info("socket.io connected in \(Date().timeIntervalSince(started), format: .fixed(precision: 2))s")
-                } catch {
-                    // end() closes this socket while it connects: that is not a failure to fall back from.
-                    guard session == self.session else { return }
-                    // Socket unreachable: keep the call usable with model tools only.
-                    Log.call.error("socket.io connect failed after \(Date().timeIntervalSince(started), format: .fixed(precision: 2))s, falling back to HTTP: \(error.localizedDescription, privacy: .public)")
-                    Diagnostics.shared.record("call", "实时通道连不上，已降级为 HTTP：\(error.localizedDescription)", error: true)
-                    socket.close()
-                    delegator = HTTPDelegator(client: client)
-                }
-            }
-
-            audio.onCapture = { [weak self] pcm in self?.sendAudio(pcm) }
-            // Queued results wait for playback to finish (web: AudioWorklet `playback` reports).
-            audio.onPlaybackIdle = { [weak self] in
-                guard let self else { return }
-                if activeResponse.isEmpty, !responseRequested { speakingResponses.removeAll() }
-                updatePhase()
-                flush()
-            }
-            try openSocket(client: client, model: configuration.model)
+            try openSocket(client: configuration.client, model: configuration.model)
         } catch {
-            Log.call.error("start failed: \(error.localizedDescription, privacy: .public)")
+            stage("realtime", "打开失败：\(describeNetworkError(error))", error: true)
             if session == self.session { fail(error.localizedDescription) }
         }
+    }
+
+    /// Features for the chat request and the delegation path (Socket.IO, else HTTP).
+    private func prepareDelegation(_ configuration: Configuration, session: Int) async {
+        let client = configuration.client
+        do {
+            let started = Date()
+            features = try await client.features(for: configuration.model)
+            guard session == self.session else { return }
+            stage("features", "完成 \(elapsed(started))")
+        } catch {
+            guard session == self.session else { return }
+            // Without features the chat model still answers, minus builtin tools like web search.
+            stage("features", "失败：\(describeNetworkError(error))，委派不带内置工具开关", error: true)
+        }
+        guard configuration.delegation == .socket else {
+            delegator = HTTPDelegator(client: client)
+            return
+        }
+        let socket = SocketDelegator(client: client)
+        delegator = socket
+        let started = Date()
+        stage("socket.io", "连接中")
+        do {
+            try await socket.connect()
+            guard session == self.session else { return }
+            stage("socket.io", "已连接 \(elapsed(started))")
+        } catch {
+            // end() closes this socket while it connects: that is not a failure to fall back from.
+            guard session == self.session else { return }
+            // Socket unreachable: keep the call usable with model tools only.
+            stage("socket.io", "\(elapsed(started)) 后失败（\(socket.lastFailure ?? error.localizedDescription)），降级为 HTTP", error: true)
+            socket.close()
+            delegator = HTTPDelegator(client: client)
+        }
+    }
+
+    /// Diagnostics line for one setup stage, timed from the start of the call.
+    private func stage(_ name: String, _ message: String, error: Bool = false) {
+        let line = "[\(name)] \(message)（通话开始后 \(elapsed(callStarted))）"
+        if error { Log.call.error("\(line, privacy: .public)") } else { Log.call.info("\(line, privacy: .public)") }
+        Diagnostics.shared.record("call", line, error: error)
+    }
+
+    private func elapsed(_ since: Date) -> String {
+        String(format: "%.1fs", Date().timeIntervalSince(since))
     }
 
     func end() {
@@ -180,6 +209,8 @@ final class BridgeCall {
         }
         session += 1
         heartbeat?.cancel()
+        readyTimeout?.cancel()
+        preparing?.cancel()
         delegation?.cancel()
         ws?.cancel(with: .normalClosure, reason: nil)
         ws = nil
@@ -228,24 +259,40 @@ final class BridgeCall {
             throw OWUIError.missing("地址")
         }
         components.scheme = components.scheme == "http" ? "ws" : "wss"
-        let task = URLSession.shared.webSocketTask(with: components.url!)
+        let task = callURLSession.webSocketTask(with: components.url!)
         task.maximumMessageSize = 4 << 20
         ws = task
         task.resume()
+        stage("realtime", "连接中")
         var auth: [String: JSON] = ["type": "auth", "token": .string(client.token), "model_id": .string(model.id)]
         if let chatID { auth["chat_id"] = .string(chatID) }
-        send(.object(auth))
+        let session = session
+        if let data = try? JSONEncoder().encode(JSON.object(auth)), let text = String(data: data, encoding: .utf8) {
+            task.send(.string(text)) { [weak self] error in
+                Task { @MainActor in
+                    guard let self, session == self.session else { return }
+                    if let error { self.stage("realtime", "发送 auth 失败：\(describeNetworkError(error))", error: true) }
+                    else { self.stage("realtime", "auth 已发出（WebSocket 已握手）") }
+                }
+            }
+        }
         receive(session: session)
 
-        let started = Date()
-        lastPong = started
+        // Without bridge.ready the call cannot work; fail visibly instead of staying at 连接中.
+        readyTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(15))
+            guard let self, !Task.isCancelled, session == self.session, !self.connected else { return }
+            let state = self.ws.map { "\($0.state.rawValue)" } ?? "nil"
+            self.stage("realtime", "15 s 内没有收到 bridge.ready（task.state=\(state)，收到消息 \(self.receivedMessages) 条）", error: true)
+            self.fail("语音连接超时：15 秒内服务器没有就绪。")
+        }
+
+        lastPong = Date()
         heartbeat = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(10))
                 guard let self else { return }
-                if !self.connected, Date().timeIntervalSince(started) > 45 {
-                    self.fail("语音连接超时。")
-                } else if self.connected {
+                if self.connected {
                     if Date().timeIntervalSince(self.lastPong) > 45 { self.fail("语音连接没有响应。") }
                     else { self.send(["type": "bridge.ping"]) }
                 }
@@ -259,6 +306,8 @@ final class BridgeCall {
                 guard let self, session == self.session else { return }
                 switch result {
                 case .success(.string(let text)):
+                    self.receivedMessages += 1
+                    if self.receivedMessages == 1 { self.stage("realtime", "收到首条消息") }
                     guard let event = try? JSONDecoder().decode(JSON.self, from: Data(text.utf8)) else {
                         self.fail("语音事件无效，通话已结束。")
                         return
@@ -267,7 +316,9 @@ final class BridgeCall {
                     self.receive(session: session)
                 case .success:
                     self.receive(session: session)
-                case .failure:
+                case .failure(let error):
+                    let close = self.ws.map { "close code \($0.closeCode.rawValue)" } ?? ""
+                    self.stage("realtime", "连接断开：\(describeNetworkError(error)) \(close)", error: true)
                     self.fail("语音连接已断开。")
                 }
             }
@@ -290,13 +341,15 @@ final class BridgeCall {
         let type = event["type"].string ?? ""
         switch type {
         case "bridge.error":
+            stage("realtime", "服务器报错：\(event["message"].string ?? "")", error: true)
             fail(event["message"].string ?? "语音通话出错。")
             return
         case "bridge.pong":
             lastPong = Date()
             return
         case "bridge.ready":
-            Log.call.info("bridge.ready")
+            readyTimeout?.cancel()
+            stage("realtime", "bridge.ready")
             guard event["sample_rate"] == 24000 else { fail("采样率不对。"); return }
             voiceModel = event["model"].string ?? ""
             connected = true
@@ -421,6 +474,7 @@ final class BridgeCall {
                 await delegator?.stop(assistantMessageID: previous.assistantID)
                 result(previous, status: "cancelled", answer: "Superseded by a new request.", speak: false)
             }
+            await preparing?.value
             guard session == self.session, let delegator else { return }
             pending = turn
             updatePhase()

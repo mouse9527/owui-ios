@@ -102,6 +102,8 @@ final class SocketDelegator: Delegator {
     private let socket: SocketIOClient
     private var waiters: [String: CheckedContinuation<Void, Never>] = [:]
     private var timedOut: Set<String> = []
+    /// Why the last `connect()` failed, for diagnostics.
+    private(set) var lastFailure: String?
     private var updates: [String: @MainActor (JSON) -> Void] = [:]
     private var taskIDs: [String: [String]] = [:]
 
@@ -128,6 +130,7 @@ final class SocketDelegator: Delegator {
     /// Action button intent hung until the shortcut timed out.
     func connect(timeout: TimeInterval = 10) async throws {
         if socket.status == .connected, socket.sid != nil { return }
+        lastFailure = nil
         let socket = socket
         let token = client.token
         var handlers: [UUID] = []
@@ -142,18 +145,30 @@ final class SocketDelegator: Delegator {
             handlers.append(socket.on(clientEvent: .connect) { _, _ in
                 MainActor.assumeIsolated { finish(nil) }
             })
-            handlers.append(socket.on(clientEvent: .error) { data, _ in
-                Log.call.error("socket.io error: \(String(describing: data.first), privacy: .public)")
-                MainActor.assumeIsolated { finish(DelegationError.socketUnavailable) }
+            handlers.append(socket.on(clientEvent: .error) { [weak self] data, _ in
+                let reason = "error \(data.first.map { String(describing: $0) } ?? "")"
+                Log.call.error("socket.io \(reason, privacy: .public)")
+                MainActor.assumeIsolated {
+                    if !resumed { self?.lastFailure = reason }
+                    finish(DelegationError.socketUnavailable)
+                }
             })
-            handlers.append(socket.on(clientEvent: .disconnect) { data, _ in
-                Log.call.info("socket.io disconnect while connecting: \(String(describing: data.first), privacy: .public)")
-                MainActor.assumeIsolated { finish(DelegationError.socketUnavailable) }
+            handlers.append(socket.on(clientEvent: .disconnect) { [weak self] data, _ in
+                let reason = "disconnect \(data.first.map { String(describing: $0) } ?? "")"
+                Log.call.info("socket.io \(reason, privacy: .public) while connecting")
+                MainActor.assumeIsolated {
+                    if !resumed { self?.lastFailure = reason }
+                    finish(DelegationError.socketUnavailable)
+                }
             })
             socket.connect(withPayload: ["token": token])
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(timeout))
-                if !resumed { Log.call.error("socket.io connect timed out after \(timeout)s, status=\(String(describing: socket.status), privacy: .public)") }
+                if !resumed {
+                    let reason = "\(Int(timeout)) s 超时，status=\(socket.status)，engine=\(String(describing: socket.manager?.engine?.connected))"
+                    self.lastFailure = reason
+                    Log.call.error("socket.io connect \(reason, privacy: .public)")
+                }
                 finish(DelegationError.socketUnavailable)
             }
         }
