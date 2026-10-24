@@ -1,0 +1,5 @@
+// Copy to Config/Local.xcconfig and fill in. That file is git-ignored.
+// Bundle IDs become <prefix>.owui and <prefix>.owui.LiveActivity.
+OWUI_BUNDLE_ID_PREFIX = io.github.yourname
+// Team ID of your personal team: Xcode > Settings > Accounts > (Apple ID) > Personal Team.
+OWUI_DEVELOPMENT_TEAM = XXXXXXXXXX

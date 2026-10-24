@@ -1,0 +1,6 @@
+// Defaults only. Put your own values in Config/Local.xcconfig (not committed).
+// A free Apple ID needs a bundle ID prefix nobody else has registered.
+OWUI_BUNDLE_ID_PREFIX = com.example
+OWUI_DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"
